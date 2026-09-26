@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "telegram-mcp",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2026-09-01",
+  "build": {
+    "command": "cargo install -q worker-build && worker-build --release"
+  },
+  "observability": { "enabled": true },
+  // Secrets (set with `wrangler secret put <NAME>`):
+  //   TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING, SPIKE_TOKEN
+  "vars": {}
+}
