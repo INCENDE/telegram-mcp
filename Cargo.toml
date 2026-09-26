@@ -1,0 +1,67 @@
+[package]
+name = "telegram-mcp"
+version = "3.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Telegram integration for Claude via the Model Context Protocol"
+license = "Apache-2.0"
+repository = "https://github.com/chigwell/telegram-mcp"
+default-run = "telegram-mcp"
+
+[lib]
+name = "telegram_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "telegram-mcp"
+path = "src/main.rs"
+
+[[bin]]
+name = "telegram-mcp-generate-session"
+path = "src/bin/generate_session.rs"
+
+[[bin]]
+name = "telegram-mcp-migrate-session"
+path = "src/bin/migrate_session.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+rmcp = { version = "3", default-features = false, features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+axum = "0.8"
+grammers-client = { version = "0.10", features = ["fs", "markdown", "html", "proxy"] }
+grammers-session = { version = "0.10", default-features = false }
+grammers-tl-types = "0.10"
+grammers-mtsender = { version = "0.10", features = ["proxy"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+rusqlite = { version = "0.32", features = ["bundled"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+qrcode = { version = "0.14", default-features = false }
+dotenvy = "0.15"
+log = "0.4"
+env_logger = "0.11"
+thiserror = "2"
+anyhow = "1"
+fs4 = { version = "0.13", features = ["sync"] }
+sha2 = "0.10"
+sha1 = "0.10"
+unicode-general-category = "1"
+url = "2"
+percent-encoding = "2"
+dirs = "6"
+mime_guess = "2"
+shlex = "1"
+rand = "0.8"
+tokio-util = "0.7"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
