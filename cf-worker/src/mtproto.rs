@@ -15,7 +15,9 @@ use grammers_mtproto::mtp::{self, Deserialization, Mtp};
 use grammers_mtproto::transport::{self, Transport};
 use grammers_mtproto::MsgId;
 use grammers_tl_types::{self as tl, Deserializable, RemoteCall};
-use worker::{WebSocket, WebsocketEvent};
+use std::future::Future;
+use std::time::Duration;
+use worker::{console_log, js_sys, Delay, Headers, Method, Request, RequestInit, WebSocket, WebsocketEvent};
 
 pub enum Error {
     /// Telegram answered the RPC with an error (e.g. `AUTH_KEY_UNREGISTERED`).
@@ -75,14 +77,53 @@ pub fn dc_host(dc_id: u8) -> Option<&'static str> {
     })
 }
 
+/// How long to wait for the WebSocket to open, and for each server reply,
+/// before giving up. Without this a silent server would hang the request
+/// until the client gives up, which tells us nothing.
+const STEP_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// Race `fut` against the clock; on timeout, fail naming `what`.
+pub async fn timeout<T>(what: &str, fut: impl Future<Output = Result<T>>) -> Result<T> {
+    let fut = std::pin::pin!(fut);
+    let delay = std::pin::pin!(Delay::from(STEP_TIMEOUT));
+    match futures_util::future::select(fut, delay).await {
+        futures_util::future::Either::Left((res, _)) => res,
+        futures_util::future::Either::Right(_) => Err(Error::Connection(format!(
+            "timed out after {}s waiting for {what}",
+            STEP_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
 /// Open the WebSocket for a datacenter. The caller keeps the returned socket
 /// alive for as long as it uses the [`Connection`] built from it.
 pub async fn open_socket(host: &str) -> Result<WebSocket> {
-    let url = format!("wss://{host}/apiws")
-        .parse()
-        .map_err(|e| Error::Connection(format!("bad ws url: {e}")))?;
-    let ws = WebSocket::connect_with_protocols(url, Some(vec!["binary"])).await?;
+    // Same request Telegram Web makes: an Upgrade with the `binary`
+    // subprotocol and a web.telegram.org Origin.
+    let headers = Headers::new();
+    headers.set("Upgrade", "websocket")?;
+    headers.set("Sec-WebSocket-Protocol", "binary")?;
+    headers.set("Origin", "https://web.telegram.org")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get).with_headers(headers);
+    let req = Request::new_with_init(&format!("https://{host}/apiws"), &init)?;
+
+    let started = js_sys::Date::now();
+    let resp = timeout(&format!("websocket upgrade to {host}"), async {
+        Ok(worker::Fetch::Request(req).send().await?)
+    })
+    .await?;
+    let status = resp.status_code();
+    let Some(ws) = resp.websocket() else {
+        return Err(Error::Connection(format!(
+            "{host} did not upgrade to a websocket (HTTP {status})"
+        )));
+    };
     ws.accept()?;
+    console_log!(
+        "ws open to {host} in {:.0}ms",
+        js_sys::Date::now() - started
+    );
     Ok(ws)
 }
 
@@ -201,12 +242,17 @@ impl<'a, M: Mtp> Connection<'a, M> {
         }
         self.transport.pack(&mut buf);
         self.ws.send_with_bytes(buf.as_ref())?;
+        console_log!("sent {} bytes (request {:?})", buf.len(), ids);
         Ok(ids)
     }
 
     async fn wait_for(&mut self, ids: &[MsgId]) -> Result<Outcome> {
         loop {
-            let event = match self.events.next().await {
+            let next = timeout("a reply from Telegram", async {
+                Ok(self.events.next().await)
+            })
+            .await?;
+            let event = match next {
                 Some(ev) => ev?,
                 None => return Err(Error::Connection("socket closed".into())),
             };
@@ -222,6 +268,7 @@ impl<'a, M: Mtp> Connection<'a, M> {
                     )))
                 }
             };
+            console_log!("received {} bytes", bytes.len());
             self.read_buf.extend_from_slice(&bytes);
             if let Some(outcome) = self.drain_read_buf(ids)? {
                 return Ok(outcome);

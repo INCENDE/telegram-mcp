@@ -8,7 +8,7 @@ use grammers_crypto::two_factor_auth::{calculate_2fa, check_p_and_g};
 use grammers_mtproto::mtp;
 use grammers_tl_types::{self as tl, RemoteCall};
 use serde::{Deserialize, Serialize};
-use worker::WebSocket;
+use worker::{js_sys, WebSocket};
 
 use crate::mtproto::{self, AuthKey, Connection, Error, Result};
 
@@ -327,6 +327,36 @@ pub fn import(dc_id: u8, key: [u8; 256]) -> Stored {
         // successful `dialogs` fills this in.
         Stage::KeyOnly,
     )
+}
+
+/// Connection diagnostics that need no account: open the socket to `host`
+/// and run the first, unencrypted step of key generation (`req_pq_multi`).
+/// Reports how far it got and how long each phase took.
+pub async fn diag(host: &str) -> serde_json::Value {
+    let t0 = js_sys::Date::now();
+    let ws = match mtproto::open_socket(host).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            return serde_json::json!({"host": host, "phase": "connect", "error": e.to_string(),
+                "ms": js_sys::Date::now() - t0})
+        }
+    };
+    let t1 = js_sys::Date::now();
+    let result = async {
+        let mut conn = Connection::plain(&ws)?;
+        let (request, _data) = grammers_mtproto::authentication::step1()?;
+        conn.invoke(&request).await?;
+        Ok::<_, Error>(())
+    }
+    .await;
+    let t2 = js_sys::Date::now();
+    let _ = ws.close(Some(1000), Some("diag"));
+    match result {
+        Ok(()) => serde_json::json!({"host": host, "phase": "done", "connect_ms": t1 - t0,
+            "req_pq_ms": t2 - t1}),
+        Err(e) => serde_json::json!({"host": host, "phase": "req_pq_multi", "error": e.to_string(),
+            "connect_ms": t1 - t0, "ms": t2 - t1}),
+    }
 }
 
 /// Confirm an imported key is authorized and learn whose it is.
