@@ -10,7 +10,7 @@ name: Deploy Cloudflare Worker
 #                          custom domain)
 #   CLOUDFLARE_ACCOUNT_ID  the account that owns the incende.fyi zone
 #
-# Application secrets (TELEGRAM_API_ID, TELEGRAM_API_HASH, ADMIN_TOKEN) are
+# Application secrets (TELEGRAM_API_ID, TELEGRAM_API_HASH) are
 # set once on the Worker itself, not here; see cf-worker/README.md.
 
 on:

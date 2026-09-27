@@ -13,11 +13,14 @@ grammers-mtproto = "0.10"
 grammers-tl-types = "0.10"
 grammers-crypto = "0.10"
 getrandom = { version = "0.4", features = ["wasm_js"] }
+# jsonwebtoken's rsa/rand stack still uses getrandom 0.2, which needs its own wasm switch.
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 futures-util = { version = "0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 console_error_panic_hook = "0.1"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 
 # grammers-mtproto calls std::time::{SystemTime, Instant}, which panic on
 # wasm32-unknown-unknown. The vendored copy is identical except that it uses
