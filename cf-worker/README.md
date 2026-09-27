@@ -97,6 +97,43 @@ Login (key exchange, `PHONE_MIGRATE`, code, two-step password) and
 a real account. Unit tests cover the session-string parser, error parsing and
 storage serialization (`cargo test --target x86_64-unknown-linux-gnu --lib`).
 
+## Security model
+
+What protects the account, and what each layer assumes:
+
+- **Cloudflare Access** is the front door. Only the owner's email (one-time
+  PIN) and the `claude-mcp` service token pass. `workers.dev` and preview
+  URLs are disabled, so the Access-protected hostname is the only route.
+- **The Worker re-verifies** every request's Access JWT (signature against
+  the team's published keys, audience, issuer, expiry). A request that
+  somehow reached the Worker without Access would still be refused.
+- **Browser-originated cross-site requests are refused** (`Origin` /
+  `Sec-Fetch-Site` check), and Access's cookie is `HttpOnly`, `SameSite=Lax`
+  and bound to the browser, so another site cannot drive the forms or the
+  MCP endpoint with the owner's session.
+- **Responses are `Cache-Control: no-store`**, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, with a CSP that permits only the page's own
+  inline styles and same-origin forms.
+- **The auth key** (equivalent to a logged-in device) lives only in the
+  Durable Object's storage, encrypted at rest by Cloudflare. It never
+  appears in logs, responses, or the repository. `TELEGRAM_API_ID` /
+  `TELEGRAM_API_HASH` are Worker secrets.
+- **Logs** record the method and path of each request and the byte counts of
+  transport frames, nothing else: no identities, phone numbers, query
+  strings, message text, or keys.
+- **Writes are opt-in.** `send_message` refuses every chat not listed in
+  `ALLOWED_SEND_CHATS`; all other tools are read-only. The Worker cannot
+  delete, edit, or forward messages, change settings, or manage contacts.
+- **Revocation.** The login page's "Log out" calls `auth.logOut` and deletes
+  the key. Independently, the session appears in Telegram → Settings →
+  Devices as "Cloudflare Worker" and can be terminated there at any time,
+  which invalidates the stored key immediately.
+
+Things this does not protect against: whoever holds the `claude-mcp` service
+token has the same access as the MCP client (rotate it in Zero Trust if it
+leaks); and chat content read through an MCP client goes to that client and
+whatever model it talks to.
+
 ## Local development
 
 `wrangler dev` runs the Worker locally; outbound WebSockets go out from your

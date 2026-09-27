@@ -167,7 +167,12 @@ impl TelegramAccount {
     async fn diag(&self, req: &Request) -> Result<Response> {
         let url = req.url()?;
         let hosts: Vec<String> = match url.query_pairs().find(|(k, _)| k == "host") {
-            Some((_, h)) => vec![h.to_string()],
+            // Only Telegram's own hosts: this endpoint must not become a way
+            // to make the Worker open connections to arbitrary servers.
+            Some((_, h)) if h.ends_with(".web.telegram.org") && !h.contains('/') => {
+                vec![h.to_string()]
+            }
+            Some(_) => return Response::error("host must be a *.web.telegram.org name", 400),
             None => (1..=5)
                 .filter_map(crate::mtproto::dc_host)
                 .map(str::to_string)

@@ -24,24 +24,11 @@ struct Jwk {
     e: String,
 }
 
+/// Claims we care about. Access also supplies `email` (human logins) and
+/// `common_name` (service tokens); they are deliberately not read so that
+/// nothing identifying is available to log by accident.
 #[derive(Deserialize)]
-pub struct Claims {
-    /// Present for human logins.
-    #[serde(default)]
-    pub email: Option<String>,
-    /// Present for service tokens.
-    #[serde(default)]
-    pub common_name: Option<String>,
-}
-
-impl Claims {
-    pub fn who(&self) -> String {
-        self.email
-            .clone()
-            .or_else(|| self.common_name.clone())
-            .unwrap_or_else(|| "unknown".into())
-    }
-}
+pub struct Claims {}
 
 pub enum Rejection {
     Missing,
