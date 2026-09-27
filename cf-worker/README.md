@@ -5,8 +5,9 @@ MTProto to Telegram as *your account* (not a bot). It logs in from a web page
 served by the Worker itself, so no session string or phone code ever passes
 through anything but Telegram and Cloudflare.
 
-Current scope: the login flow and one connection test (`/spike`). The MCP
-tools come next, once the connection test has run on a real account.
+It serves a small MCP server at `/mcp` with four tools: `list_chats`,
+`get_messages`, `search_messages`, and `send_message` (the last restricted to
+an allow-list of chats). Everything else is read-only.
 
 ## How it works
 
@@ -16,6 +17,8 @@ tools come next, once the connection test has run on a real account.
 | `src/telegram.rs` | Login (`auth.sendCode`, `auth.signIn`, SRP `auth.checkPassword`), `PHONE_MIGRATE` handling, logout, `messages.getDialogs`. |
 | `src/account.rs` | A Durable Object named `account`. Holds the authorization in its storage and serializes every Telegram call, so the auth key is never used from two connections at once (Telegram invalidates keys it sees concurrently from different IPs, and Workers egress from many). |
 | `src/html.rs` | The login page: plain HTML forms, works from a phone. |
+| `src/tools.rs` | The tool implementations: dialogs, history, search, send. Keeps a cache of peer access hashes in Durable Object storage. |
+| `src/mcp.rs` | JSON-RPC framing for the streamable-HTTP MCP transport (stateless: one POST per message, JSON responses) and the tool catalogue. |
 | `src/lib.rs` | The Worker entry: verifies the Cloudflare Access JWT, forwards to the Durable Object. |
 | `src/access.rs` | Fetches the Zero Trust team's signing keys and validates `Cf-Access-Jwt-Assertion` (RS256, `aud`, `iss`, `exp`). |
 | `src/session.rs` | Optional import of a Telethon `StringSession` (from the repo's `session_string_generator.py`). |
@@ -53,33 +56,46 @@ One-time setup:
 6. Open `https://telegram.incende.fyi/spike`. It returns your 20 most recent
    chats as JSON with `total_ms`. That is the connection test.
 
+## Connecting an MCP client
+
+The endpoint is `https://telegram.incende.fyi/mcp`. It sits behind Cloudflare
+Access, so a non-interactive client authenticates with the `claude-mcp`
+service token (Zero Trust → Access → Service auth). Claude Code:
+
+```bash
+claude mcp add --transport http telegram https://telegram.incende.fyi/mcp \
+  --header "CF-Access-Client-Id: <client id>" \
+  --header "CF-Access-Client-Secret: <client secret>"
+```
+
+Codex and other clients that speak streamable HTTP work the same way as long
+as they can send those two headers.
+
+### Allowing sends
+
+`send_message` refuses every chat until the Worker variable
+`ALLOWED_SEND_CHATS` lists it: a comma-separated list of chat ids as printed
+by `list_chats`, e.g. `-1001234567890` is *not* the format; use the bare id
+the tool returns (`1234567890`). Set it as a plaintext variable in Workers &
+Pages → telegram-mcp → Settings → Variables and Secrets (it survives deploys
+thanks to `keep_vars`). Leave it unset for a read-only server.
+
 `POST /logout` (the button on the login page) calls `auth.logOut` and
 deletes the stored key.
 
-## Plan limits
+## Cost per call
 
-The auth-key exchange during login and the SRP password check are the two
-CPU-heavy steps (2048-bit modular exponentiation in wasm). On the Workers
-free plan (10 ms CPU per request) they may exceed the limit; the Workers
-Paid plan ($5/month) allows 30 s. Ordinary calls after login are cheap
-(AES/SHA over a few kilobytes). If login fails with an "Exceeded CPU" error
-in the Worker logs, that is the reason.
+Every tool call opens a fresh WebSocket to Telegram (about 0.6–1.2 s to the
+home datacenter) and runs one RPC (150–300 ms), so expect 1–2 s per call.
+The login's key exchange measured about 100 ms of CPU and completed on the
+free plan; ordinary calls use a few milliseconds.
 
-## Verified without credentials
+## Status
 
-- grammers crates compile to `wasm32-unknown-unknown`.
-- Bundle: 992 KiB raw, 387 KiB gzipped (limit 3 MiB on the free plan).
-- `wrangler deploy --dry-run` passes with the Durable Object binding.
-- Session-string parser and DC-migration error parsing are unit-tested
-  (`cargo test --target x86_64-unknown-linux-gnu --lib`).
-
-## Not yet verified
-
-The live round trip to Telegram: whether Telegram accepts the WebSocket +
-obfuscated-intermediate handshake from a Worker (expected: yes, browsers do
-the same), the CPU cost of login against the plan limit, and per-call
-latency. The development sandbox this was written in cannot reach
-`*.web.telegram.org`, so step 5 above is the test.
+Login (key exchange, `PHONE_MIGRATE`, code, two-step password) and
+`messages.getDialogs` have been exercised end to end from Cloudflare against
+a real account. Unit tests cover the session-string parser, error parsing and
+storage serialization (`cargo test --target x86_64-unknown-linux-gnu --lib`).
 
 ## Local development
 

@@ -67,6 +67,14 @@ pub fn login_page(stage: Option<&Stage>, notice: Option<(&str, bool)>) -> String
             <h1>Logged in</h1>
             <p>Connected as <b>{}</b> (id {}).</p>
             <p><a href="/spike">Run the connection test</a> (returns JSON).</p>
+            <h2>Connect an MCP client</h2>
+            <p>Endpoint: <code>https://telegram.incende.fyi/mcp</code>. Cloudflare Access
+            protects it, so the client must present the <code>claude-mcp</code> service token:</p>
+            <pre>claude mcp add --transport http telegram https://telegram.incende.fyi/mcp \
+  --header "CF-Access-Client-Id: &lt;id&gt;" \
+  --header "CF-Access-Client-Secret: &lt;secret&gt;"</pre>
+            <p>Tools: list_chats, get_messages, search_messages, send_message
+            (sending only to chats listed in the Worker's <code>ALLOWED_SEND_CHATS</code> variable).</p>
             <form method="post" action="/logout"><button class="danger">Log out and forget the key</button></form>"#,
             esc(name),
             user_id
@@ -88,6 +96,9 @@ pub fn login_page(stage: Option<&Stage>, notice: Option<(&str, bool)>) -> String
   button.link {{ background: none; border: none; padding: 0; text-decoration: underline; color: inherit; margin-top: 1rem; }}
   button.danger {{ color: #b00020; }}
   details {{ margin-top: 2rem; }}
+  h2 {{ font-size: 1.1rem; margin-top: 2rem; }}
+  pre, code {{ font-size: .85em; }}
+  pre {{ overflow-x: auto; padding: .6rem; background: rgba(127,127,127,.12); border-radius: 4px; }}
   .notice {{ padding: .6rem .8rem; border-radius: 4px; }}
   .notice.error {{ background: #fde8e8; color: #7a0000; }}
   .notice.ok {{ background: #e6f6ea; color: #0b5a1f; }}
