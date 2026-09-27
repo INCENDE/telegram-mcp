@@ -61,4 +61,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: cf-worker
+          # The action's default is wrangler 3.x, which does not read
+          # wrangler.jsonc ("Missing entry-point").
+          wranglerVersion: "4.141.0"
           command: deploy
