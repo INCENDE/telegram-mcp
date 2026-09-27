@@ -1,0 +1,64 @@
+name: Deploy Cloudflare Worker
+
+# Builds cf-worker/ (Rust → wasm) and deploys it with wrangler. Runs on
+# demand, and automatically when cf-worker/ changes on main.
+#
+# Repository secrets required (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   API token with the "Edit Cloudflare Workers"
+#                          template permissions (Workers Scripts, Workers
+#                          Routes, and DNS on the incende.fyi zone for the
+#                          custom domain)
+#   CLOUDFLARE_ACCOUNT_ID  the account that owns the incende.fyi zone
+#
+# Application secrets (TELEGRAM_API_ID, TELEGRAM_API_HASH, ADMIN_TOKEN) are
+# set once on the Worker itself, not here; see cf-worker/README.md.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "cf-worker/**"
+      - ".github/workflows/cf-worker-deploy.yml"
+
+concurrency:
+  group: cf-worker-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: cf-worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cf-worker
+          cache-all-crates: true
+
+      # wrangler.jsonc's build command runs `cargo install -q worker-build`
+      # too; installing here first makes that a cached no-op.
+      - name: Install worker-build
+        run: cargo install --locked worker-build
+
+      - name: Unit tests (native)
+        run: cargo test --target x86_64-unknown-linux-gnu --lib
+
+      - name: Build wasm
+        run: worker-build --release
+
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cf-worker
+          command: deploy

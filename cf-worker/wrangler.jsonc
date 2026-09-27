@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "telegram-mcp",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2026-09-01",
+  "build": {
+    "command": "cargo install -q worker-build && worker-build --release"
+  },
+  "observability": { "enabled": true },
+  "routes": [
+    { "pattern": "telegram.incende.fyi", "custom_domain": true }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TELEGRAM_ACCOUNT", "class_name": "TelegramAccount" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TelegramAccount"] }
+  ],
+  // Secrets (Workers → telegram-mcp → Settings → Variables and Secrets, or
+  // `wrangler secret put <NAME>`):
+  //   TELEGRAM_API_ID, TELEGRAM_API_HASH  — from https://my.telegram.org/apps
+  //   ADMIN_TOKEN                          — any random string, 16+ chars
+  "vars": {}
+}
