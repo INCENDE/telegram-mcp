@@ -25,7 +25,7 @@ pub struct Stored {
     pub stage: Stage,
 }
 
-mod i64_string {
+pub(crate) mod i64_string {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(v: &i64, s: S) -> Result<S::Ok, S::Error> {
@@ -92,7 +92,7 @@ pub struct Config {
 }
 
 impl Config {
-    fn host(&self, dc_id: u8) -> Result<String> {
+    pub(crate) fn host(&self, dc_id: u8) -> Result<String> {
         if let Some(h) = &self.ws_host {
             return Ok(h.clone());
         }
@@ -101,7 +101,7 @@ impl Config {
             .ok_or_else(|| Error::Connection(format!("no websocket host known for DC {dc_id}")))
     }
 
-    fn init<R: RemoteCall>(
+    pub(crate) fn init<R: RemoteCall>(
         &self,
         query: R,
     ) -> tl::functions::InvokeWithLayer<tl::functions::InitConnection<R>> {
@@ -132,7 +132,7 @@ pub async fn new_key(cfg: &Config, dc_id: u8) -> Result<(WebSocket, Stored)> {
     Ok((ws, Stored::from_auth(dc_id, &auth, Stage::KeyOnly)))
 }
 
-async fn connect<'a>(
+pub(crate) async fn connect<'a>(
     ws: &'a WebSocket,
     stored: &Stored,
 ) -> Result<Connection<'a, mtp::Encrypted>> {

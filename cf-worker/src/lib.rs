@@ -10,13 +10,16 @@
 //!   browser, so no session string ever has to leave Cloudflare.
 //! - `POST /logout`: revoke the authorization and forget the key.
 //! - `GET /spike`: connection test, returns the first 20 dialogs and timing.
+//! - `POST /mcp`: the MCP server (streamable HTTP, stateless JSON-RPC).
 
 mod access;
 mod account;
 mod html;
+mod mcp;
 mod mtproto;
 mod session;
 mod telegram;
+mod tools;
 
 use worker::*;
 

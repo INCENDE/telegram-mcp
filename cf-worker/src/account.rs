@@ -8,11 +8,16 @@
 
 use worker::*;
 
+use serde_json::Value;
+
 use crate::html;
+use crate::mcp;
 use crate::session;
 use crate::telegram::{self, Config, SignIn, Stage, Stored};
+use crate::tools::{self, PeerCache};
 
 const STORAGE_KEY: &str = "session";
+const PEERS_KEY: &str = "peers";
 
 #[durable_object(fetch)]
 pub struct TelegramAccount {
@@ -37,6 +42,11 @@ impl DurableObject for TelegramAccount {
             (Method::Post, "/logout") => self.logout().await,
             (Method::Get, "/spike") => self.spike().await,
             (Method::Get, "/diag") => self.diag(&req).await,
+            (Method::Post, "/mcp") => self.mcp(&mut req).await,
+            (Method::Get, "/mcp") | (Method::Delete, "/mcp") => {
+                // Stateless server: no SSE stream to open, no session to end.
+                Response::error("method not allowed", 405)
+            }
             _ => Response::error("not found", 404),
         }
     }
@@ -187,6 +197,153 @@ impl TelegramAccount {
             Err(e) => Response::error(e.to_string(), 502),
         }
     }
+}
+
+impl TelegramAccount {
+    async fn peers(&self) -> Result<PeerCache> {
+        Ok(self.state.storage().get(PEERS_KEY).await?.unwrap_or_default())
+    }
+
+    async fn save_peers(&self, cache: &PeerCache) -> Result<()> {
+        self.state.storage().put(PEERS_KEY, cache).await
+    }
+
+    /// Chats that `send_message` may write to, from the `ALLOWED_SEND_CHATS`
+    /// variable (comma-separated ids). Unset means sending is disabled.
+    fn allowed_send_chats(&self) -> Vec<i64> {
+        self.env
+            .var("ALLOWED_SEND_CHATS")
+            .map(|v| v.to_string())
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect()
+    }
+
+    async fn mcp(&self, req: &mut Request) -> Result<Response> {
+        let body = req.text().await?;
+        let (id, method, params) = match mcp::parse(&body) {
+            mcp::Incoming::Request { id, method, params } => (id, method, params),
+            mcp::Incoming::Notification => {
+                return Ok(Response::empty()?.with_status(202));
+            }
+            mcp::Incoming::Invalid(why) => {
+                return json_response(mcp::error(&Value::Null, mcp::INVALID_REQUEST, why));
+            }
+        };
+
+        let reply = match method.as_str() {
+            "initialize" => mcp::ok(&id, mcp::initialize_result()),
+            "ping" => mcp::ok(&id, serde_json::json!({})),
+            "tools/list" => mcp::ok(&id, mcp::tools()),
+            "tools/call" => {
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+                match self.call_tool(name, &args).await {
+                    Ok(text) => mcp::ok(&id, mcp::tool_result(text, false)),
+                    Err(ToolError::Unknown) => {
+                        mcp::error(&id, mcp::INVALID_PARAMS, format!("unknown tool '{name}'"))
+                    }
+                    Err(ToolError::Args(m)) => mcp::error(&id, mcp::INVALID_PARAMS, m),
+                    // Tool-level failures go back as results so the model can react.
+                    Err(ToolError::Failed(m)) => mcp::ok(&id, mcp::tool_result(m, true)),
+                }
+            }
+            other => mcp::error(&id, mcp::METHOD_NOT_FOUND, format!("unknown method '{other}'")),
+        };
+        json_response(reply)
+    }
+
+    async fn call_tool(&self, name: &str, args: &Value) -> std::result::Result<String, ToolError> {
+        let cfg = self.config().map_err(|e| ToolError::Failed(e.to_string()))?;
+        let stored = match self.load().await.map_err(|e| ToolError::Failed(e.to_string()))? {
+            Some(s) if matches!(s.stage, Stage::Authorized { .. }) => s,
+            _ => return Err(ToolError::Failed("not logged in to Telegram: open /login".into())),
+        };
+        let mut cache = self.peers().await.map_err(|e| ToolError::Failed(e.to_string()))?;
+
+        let result = match name {
+            "list_chats" => {
+                let limit = mcp::int_arg(args, "limit", 30).map_err(ToolError::Args)?;
+                tools::list_chats(&cfg, &stored, &mut cache, limit as i32)
+                    .await
+                    .map(|chats| serde_json::to_string_pretty(&chats).unwrap_or_default())
+            }
+            "get_messages" => {
+                let chat_id = mcp::int_arg(args, "chat_id", 0).map_err(ToolError::Args)?;
+                if chat_id == 0 {
+                    return Err(ToolError::Args("'chat_id' is required".into()));
+                }
+                let limit = mcp::int_arg(args, "limit", 30).map_err(ToolError::Args)?;
+                let before = mcp::opt_int_arg(args, "before_id").map_err(ToolError::Args)?;
+                tools::get_messages(
+                    &cfg,
+                    &stored,
+                    &mut cache,
+                    chat_id,
+                    limit as i32,
+                    before.map(|b| b as i32),
+                )
+                .await
+                .map(|m| serde_json::to_string_pretty(&m).unwrap_or_default())
+            }
+            "search_messages" => {
+                let query = mcp::str_arg(args, "query").map_err(ToolError::Args)?;
+                let chat_id = mcp::opt_int_arg(args, "chat_id").map_err(ToolError::Args)?;
+                let limit = mcp::int_arg(args, "limit", 20).map_err(ToolError::Args)?;
+                tools::search_messages(&cfg, &stored, &mut cache, query, chat_id, limit as i32)
+                    .await
+                    .map(|m| serde_json::to_string_pretty(&m).unwrap_or_default())
+            }
+            "send_message" => {
+                let chat_id = mcp::int_arg(args, "chat_id", 0).map_err(ToolError::Args)?;
+                let text = mcp::str_arg(args, "text").map_err(ToolError::Args)?;
+                let reply_to = mcp::opt_int_arg(args, "reply_to").map_err(ToolError::Args)?;
+                let allowed = self.allowed_send_chats();
+                if !allowed.contains(&chat_id) {
+                    return Err(ToolError::Failed(format!(
+                        "sending to chat {chat_id} is not allowed. Allowed chats: {}. \
+                         The owner sets ALLOWED_SEND_CHATS on the Worker.",
+                        if allowed.is_empty() {
+                            "none".to_string()
+                        } else {
+                            allowed.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
+                        }
+                    )));
+                }
+                tools::send_message(
+                    &cfg,
+                    &stored,
+                    &mut cache,
+                    chat_id,
+                    text,
+                    reply_to.map(|r| r as i32),
+                )
+                .await
+                .map(|sent| match sent.message_id {
+                    Some(id) => format!("sent to {} (message id {id})", sent.chat),
+                    None => format!("sent to {}", sent.chat),
+                })
+            }
+            _ => return Err(ToolError::Unknown),
+        };
+
+        // Persist whatever the call learned about peers, even on failure.
+        let _ = self.save_peers(&cache).await;
+        result.map_err(|e| ToolError::Failed(e.to_string()))
+    }
+}
+
+enum ToolError {
+    Unknown,
+    Args(String),
+    Failed(String),
+}
+
+fn json_response(v: Value) -> Result<Response> {
+    let mut resp = Response::from_json(&v)?;
+    resp.headers_mut().set("content-type", "application/json")?;
+    Ok(resp)
 }
 
 async fn field(req: &mut Request, name: &str) -> Result<String> {
