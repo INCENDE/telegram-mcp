@@ -17,7 +17,7 @@ use grammers_mtproto::MsgId;
 use grammers_tl_types::{self as tl, Deserializable, RemoteCall};
 use std::future::Future;
 use std::time::Duration;
-use worker::{console_log, js_sys, Delay, Headers, Method, Request, RequestInit, WebSocket, WebsocketEvent};
+use worker::{console_log, js_sys, wasm_bindgen, Delay, Headers, Method, Request, RequestInit, WebSocket, WebsocketEvent};
 
 pub enum Error {
     /// Telegram answered the RPC with an error (e.g. `AUTH_KEY_UNREGISTERED`).
@@ -257,9 +257,7 @@ impl<'a, M: Mtp> Connection<'a, M> {
                 None => return Err(Error::Connection("socket closed".into())),
             };
             let bytes = match event {
-                WebsocketEvent::Message(msg) => msg
-                    .bytes()
-                    .ok_or_else(|| Error::Connection("non-binary ws frame".into()))?,
+                WebsocketEvent::Message(msg) => frame_bytes(&msg).await?,
                 WebsocketEvent::Close(ev) => {
                     return Err(Error::Connection(format!(
                         "socket closed ({}: {})",
@@ -338,6 +336,43 @@ impl<'a, M: Mtp> Connection<'a, M> {
 enum Outcome {
     Result(Vec<u8>),
     Retry,
+}
+
+/// Extract the payload of a binary WebSocket frame.
+///
+/// `MessageEvent::bytes()` assumes an `ArrayBuffer`; if the runtime hands us
+/// a `Blob` instead, that yields an empty array and the reply is lost. Handle
+/// both, and name anything else so the log says what arrived.
+async fn frame_bytes(msg: &worker::MessageEvent) -> Result<Vec<u8>> {
+    use wasm_bindgen::JsCast;
+    let data: wasm_bindgen::JsValue = msg.as_ref().data();
+    if data.is_instance_of::<js_sys::ArrayBuffer>() {
+        return Ok(js_sys::Uint8Array::new(&data).to_vec());
+    }
+    if data.is_instance_of::<js_sys::Uint8Array>() {
+        return Ok(data.unchecked_into::<js_sys::Uint8Array>().to_vec());
+    }
+    // Anything with an `arrayBuffer()` method (a Blob) is read asynchronously.
+    let method = js_sys::Reflect::get(&data, &"arrayBuffer".into())
+        .ok()
+        .filter(|m| m.is_function());
+    if let Some(method) = method {
+        let promise: js_sys::Promise = method
+            .unchecked_into::<js_sys::Function>()
+            .call0(&data)
+            .map_err(|_| Error::Connection("blob.arrayBuffer() failed".into()))?
+            .unchecked_into();
+        let buf = worker::wasm_bindgen_futures::JsFuture::from(promise)
+            .await
+            .map_err(|_| Error::Connection("reading blob failed".into()))?;
+        return Ok(js_sys::Uint8Array::new(&buf).to_vec());
+    }
+    let kind = js_sys::Reflect::get(&data, &"constructor".into())
+        .ok()
+        .and_then(|c| js_sys::Reflect::get(&c, &"name".into()).ok())
+        .and_then(|n| n.as_string())
+        .unwrap_or_else(|| data.js_typeof().as_string().unwrap_or_default());
+    Err(Error::Connection(format!("unexpected websocket frame type: {kind}")))
 }
 
 #[cfg(test)]
