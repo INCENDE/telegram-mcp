@@ -36,6 +36,7 @@ impl DurableObject for TelegramAccount {
             (Method::Post, "/login/import") => self.import(&mut req).await,
             (Method::Post, "/logout") => self.logout().await,
             (Method::Get, "/spike") => self.spike().await,
+            (Method::Get, "/diag") => self.diag(&req).await,
             _ => Response::error("not found", 404),
         }
     }
@@ -149,6 +150,24 @@ impl TelegramAccount {
         }
         self.state.storage().delete(STORAGE_KEY).await?;
         self.page(Some(("Logged out.", false))).await
+    }
+
+    /// `GET /diag[?host=...]`: transport check against the given host, or
+    /// against every production datacenter when none is given.
+    async fn diag(&self, req: &Request) -> Result<Response> {
+        let url = req.url()?;
+        let hosts: Vec<String> = match url.query_pairs().find(|(k, _)| k == "host") {
+            Some((_, h)) => vec![h.to_string()],
+            None => (1..=5)
+                .filter_map(crate::mtproto::dc_host)
+                .map(str::to_string)
+                .collect(),
+        };
+        let mut out = Vec::new();
+        for h in hosts {
+            out.push(telegram::diag(&h).await);
+        }
+        Response::from_json(&out)
     }
 
     async fn spike(&self) -> Result<Response> {

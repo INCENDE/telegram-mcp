@@ -11,6 +11,8 @@
   // workers.dev and preview URLs are off so nothing bypasses Access.
   "workers_dev": false,
   "preview_urls": false,
+  // Do not wipe variables added in the dashboard on deploy.
+  "keep_vars": true,
   "routes": [
     { "pattern": "telegram.incende.fyi", "custom_domain": true }
   ],
