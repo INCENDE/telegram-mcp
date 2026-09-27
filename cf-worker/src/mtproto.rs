@@ -128,6 +128,10 @@ pub async fn open_socket(host: &str) -> Result<WebSocket> {
 }
 
 const MAX_ATTEMPTS: usize = 4;
+/// Replies to let through while the protocol settles its salts and session
+/// before it accepts our first request (new_session_created, bad_server_salt,
+/// future_salts each take a round).
+const MAX_INTERNAL_ROUNDS: usize = 8;
 
 pub struct Connection<'a, M: Mtp> {
     events: worker::EventStream<'a>,
@@ -220,19 +224,19 @@ impl<'a, M: Mtp> Connection<'a, M> {
         let mut internal_rounds = 0;
         while attempts < MAX_ATTEMPTS {
             match self.send(&body)? {
-                Some(ids) => {
+                Sent::Request(ids) => {
                     attempts += 1;
                     match self.wait_for(&ids).await? {
                         Outcome::Result(bytes) => return Ok(bytes),
                         Outcome::Retry => continue,
                     }
                 }
-                None => {
-                    // The Mtp layer put its own traffic in the packet (a
-                    // future-salts request) and held ours back until that is
-                    // answered. Let the reply in, then push again.
+                // The Mtp layer is busy with its own traffic (a future-salts
+                // request it sent, or is still waiting on) and holds ours back
+                // until that is answered. Let one more reply in, then retry.
+                Sent::Internal | Sent::Nothing => {
                     internal_rounds += 1;
-                    if internal_rounds > MAX_ATTEMPTS {
+                    if internal_rounds > MAX_INTERNAL_ROUNDS {
                         return Err(Error::Connection(
                             "protocol never accepted the request".into(),
                         ));
@@ -244,17 +248,17 @@ impl<'a, M: Mtp> Connection<'a, M> {
         Err(Error::Connection("request rejected repeatedly".into()))
     }
 
-    /// Serialize and send one packet. Returns the message ids to wait for, or
-    /// `None` when the packet carried only the protocol's internal messages
-    /// and the request itself was not included.
-    fn send(&mut self, body: &[u8]) -> Result<Option<Vec<MsgId>>> {
+    /// Serialize and send one packet.
+    fn send(&mut self, body: &[u8]) -> Result<Sent> {
         // Front capacity holds the transport header (4-byte length plus the
         // 64-byte obfuscation preamble on the first packet).
         let mut buf = DequeBuffer::with_capacity(body.len() + 64, 80);
         let msg_id = self.mtp.push(&mut buf, body);
         let container_id = self.mtp.finalize(&mut buf);
         if buf.is_empty() {
-            return Err(Error::Connection("request too large".into()));
+            // Nothing to send: the protocol is waiting on a reply it already
+            // asked for before it will take our request.
+            return Ok(Sent::Nothing);
         }
         self.transport.pack(&mut buf);
         self.ws.send_with_bytes(buf.as_ref())?;
@@ -268,7 +272,10 @@ impl<'a, M: Mtp> Connection<'a, M> {
             ids
         });
         console_log!("sent {} bytes ({:?})", buf.len(), ids);
-        Ok(ids)
+        Ok(match ids {
+            Some(ids) => Sent::Request(ids),
+            None => Sent::Internal,
+        })
     }
 
     async fn wait_for(&mut self, ids: &[MsgId]) -> Result<Outcome> {
@@ -366,6 +373,15 @@ impl<'a, M: Mtp> Connection<'a, M> {
 enum Outcome {
     Result(Vec<u8>),
     Retry,
+}
+
+enum Sent {
+    /// Our request went out; wait for these ids.
+    Request(Vec<MsgId>),
+    /// Only protocol-internal messages went out.
+    Internal,
+    /// The protocol produced nothing; it is waiting on a reply.
+    Nothing,
 }
 
 /// Extract the payload of a binary WebSocket frame.
