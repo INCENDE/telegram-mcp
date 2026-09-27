@@ -18,8 +18,25 @@ pub struct Stored {
     pub dc_id: u8,
     pub key: Vec<u8>,
     pub time_offset: i32,
+    /// Durable Object storage goes through JavaScript values, which cannot
+    /// hold a full i64, so the salt travels as a decimal string.
+    #[serde(with = "i64_string")]
     pub salt: i64,
     pub stage: Stage,
+}
+
+mod i64_string {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &i64, s: S) -> Result<S::Ok, S::Error> {
+        v.to_string().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -36,6 +53,7 @@ pub enum Stage {
         hint: String,
     },
     Authorized {
+        #[serde(with = "i64_string")]
         user_id: i64,
         name: String,
     },
@@ -452,4 +470,28 @@ fn summarize(result: tl::enums::messages::Dialogs) -> Vec<DialogOut> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_round_trips_large_salt_through_json() {
+        let stored = Stored {
+            dc_id: 5,
+            key: vec![7; 256],
+            time_offset: -3,
+            salt: i64::MIN + 12345,
+            stage: Stage::Authorized {
+                user_id: 9_007_199_254_740_993, // 2^53 + 1
+                name: "x".into(),
+            },
+        };
+        let json = serde_json::to_string(&stored).unwrap();
+        assert!(json.contains("\"salt\":\"-9223372036854763463\""));
+        let back: Stored = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.salt, stored.salt);
+        assert!(matches!(back.stage, Stage::Authorized { user_id, .. } if user_id == 9_007_199_254_740_993));
+    }
 }
