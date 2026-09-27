@@ -77,7 +77,8 @@ impl TelegramAccount {
     /// Render the login page for the current stage, with an optional notice.
     async fn page(&self, notice: Option<(&str, bool)>) -> Result<Response> {
         let stage = self.load().await?.map(|s| s.stage);
-        Response::from_html(html::login_page(stage.as_ref(), notice))
+        let connections = crate::oauth::connections(&self.state.storage()).await?;
+        Response::from_html(html::login_page(stage.as_ref(), notice, &connections))
     }
 
     async fn phone(&self, req: &mut Request) -> Result<Response> {

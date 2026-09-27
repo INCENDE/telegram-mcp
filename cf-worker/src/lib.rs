@@ -17,6 +17,7 @@ mod account;
 mod html;
 mod mcp;
 mod mtproto;
+mod oauth;
 mod session;
 mod telegram;
 mod tools;
