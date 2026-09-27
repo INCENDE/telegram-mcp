@@ -313,18 +313,27 @@ impl<'a, M: Mtp> Connection<'a, M> {
 
     /// Unpack every complete transport frame in the read buffer and look for
     /// the answer to `ids`. Unrelated messages (updates, acks) are dropped.
+    ///
+    /// Consumed frames are always removed from the buffer, including when
+    /// the answer is an error: the obfuscation cipher is a stream, and a
+    /// stale frame left behind would be decrypted a second time on the next
+    /// call and turn every later byte to garbage.
     fn drain_read_buf(&mut self, ids: &[MsgId]) -> Result<Option<Outcome>> {
         let mut outcome = None;
+        let mut failure = None;
         let mut next = 0;
-        while next != self.read_buf.len() {
+        'frames: while next != self.read_buf.len() {
             match self.transport.unpack(&mut self.read_buf[next..]) {
                 Ok(offset) => {
                     let payload = &mut self.read_buf[next..][offset.data_range];
-                    let results = self
-                        .mtp
-                        .deserialize(payload)
-                        .map_err(|e| Error::Connection(format!("mtp: {e}")))?;
                     next += offset.next_offset;
+                    let results = match self.mtp.deserialize(payload) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            failure = Some(Error::Connection(format!("mtp: {e}")));
+                            break 'frames;
+                        }
+                    };
                     for result in results {
                         match result {
                             Deserialization::RpcResult(r) if ids.contains(&r.msg_id) => {
@@ -335,38 +344,47 @@ impl<'a, M: Mtp> Connection<'a, M> {
                                     error_code,
                                     error_message,
                                 } = e.error;
-                                return Err(Error::Rpc {
+                                failure = Some(Error::Rpc {
                                     code: error_code,
                                     message: error_message,
                                 });
+                                break 'frames;
                             }
                             Deserialization::BadMessage(b) if ids.contains(&b.msg_id) => {
                                 if b.retryable() {
                                     outcome = Some(Outcome::Retry);
                                 } else {
-                                    return Err(Error::Connection(format!(
+                                    failure = Some(Error::Connection(format!(
                                         "bad message {}: {}",
                                         b.code,
                                         b.description()
                                     )));
+                                    break 'frames;
                                 }
                             }
                             Deserialization::Failure(f) if ids.contains(&f.msg_id) => {
-                                return Err(Error::Connection(format!(
+                                failure = Some(Error::Connection(format!(
                                     "failed to deserialize response: {}",
                                     f.error
                                 )));
+                                break 'frames;
                             }
                             _ => {}
                         }
                     }
                 }
                 Err(transport::Error::MissingBytes) => break,
-                Err(e) => return Err(Error::Connection(format!("transport: {e}"))),
+                Err(e) => {
+                    failure = Some(Error::Connection(format!("transport: {e}")));
+                    break;
+                }
             }
         }
         self.read_buf.drain(..next);
-        Ok(outcome)
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(outcome),
+        }
     }
 }
 
