@@ -7,6 +7,10 @@
     "command": "cargo install -q worker-build && worker-build --release"
   },
   "observability": { "enabled": true },
+  // The custom domain is the only route: Cloudflare Access is enforced on it.
+  // workers.dev and preview URLs are off so nothing bypasses Access.
+  "workers_dev": false,
+  "preview_urls": false,
   "routes": [
     { "pattern": "telegram.incende.fyi", "custom_domain": true }
   ],
@@ -18,9 +22,13 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["TelegramAccount"] }
   ],
+  "vars": {
+    // Zero Trust team domain and the Access application's AUD tag; the Worker
+    // verifies every request's Cf-Access-Jwt-Assertion against these.
+    "ACCESS_TEAM_DOMAIN": "weathered-haze-6c01.cloudflareaccess.com",
+    "ACCESS_AUD": "cdb949651eeab8a13041b7223c20dd5d4b7c228980a6e839f55e70aff78e7ec6"
+  }
   // Secrets (Workers → telegram-mcp → Settings → Variables and Secrets, or
   // `wrangler secret put <NAME>`):
   //   TELEGRAM_API_ID, TELEGRAM_API_HASH  — from https://my.telegram.org/apps
-  //   ADMIN_TOKEN                          — any random string, 16+ chars
-  "vars": {}
 }

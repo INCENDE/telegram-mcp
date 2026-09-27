@@ -16,7 +16,8 @@ tools come next, once the connection test has run on a real account.
 | `src/telegram.rs` | Login (`auth.sendCode`, `auth.signIn`, SRP `auth.checkPassword`), `PHONE_MIGRATE` handling, logout, `messages.getDialogs`. |
 | `src/account.rs` | A Durable Object named `account`. Holds the authorization in its storage and serializes every Telegram call, so the auth key is never used from two connections at once (Telegram invalidates keys it sees concurrently from different IPs, and Workers egress from many). |
 | `src/html.rs` | The login page: plain HTML forms, works from a phone. |
-| `src/lib.rs` | The Worker entry: checks `ADMIN_TOKEN`, forwards to the Durable Object. |
+| `src/lib.rs` | The Worker entry: verifies the Cloudflare Access JWT, forwards to the Durable Object. |
+| `src/access.rs` | Fetches the Zero Trust team's signing keys and validates `Cf-Access-Jwt-Assertion` (RS256, `aud`, `iss`, `exp`). |
 | `src/session.rs` | Optional import of a Telethon `StringSession` (from the repo's `session_string_generator.py`). |
 | `vendor/grammers-mtproto` | Unmodified copy of the crate except `std::time` → `web-time`, because `SystemTime::now()` panics on `wasm32-unknown-unknown`. Wired in through `[patch.crates-io]`. |
 
@@ -36,16 +37,20 @@ One-time setup:
 2. Run the workflow once. It creates the Worker `telegram-mcp` and binds
    `telegram.incende.fyi` to it.
 3. **Worker secrets** (Cloudflare dashboard → Workers & Pages → telegram-mcp
-   → Settings → Variables and Secrets):
-   - `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` from <https://my.telegram.org/apps>
-   - `ADMIN_TOKEN`: any random string of 16+ characters. It is the only
-     thing standing between the internet and your Telegram account, so make
-     it long.
-4. Open `https://telegram.incende.fyi/login?token=<ADMIN_TOKEN>` on your
-   phone. Enter your number, then the code Telegram sends, then your cloud
-   password if you have one. The token is kept in a cookie for a day after
-   the first visit.
-5. Open `https://telegram.incende.fyi/spike`. It returns your 20 most recent
+   → Settings → Variables and Secrets): `TELEGRAM_API_ID` and
+   `TELEGRAM_API_HASH` from <https://my.telegram.org/apps>.
+4. **Access.** The hostname is protected by a Cloudflare Access application
+   (`telegram-mcp` in Zero Trust → Access → Applications). Its policies allow
+   the owner's email through a one-time PIN, and the `claude-mcp` service
+   token for non-interactive MCP clients. The Worker additionally verifies
+   the Access JWT against `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` in
+   `wrangler.jsonc`, and `workers.dev` / preview URLs are disabled, so there
+   is no path around Access. If the application is recreated, update
+   `ACCESS_AUD`.
+5. Open `https://telegram.incende.fyi/login` on your phone. Access asks for
+   your email and emails you a PIN; then enter your Telegram number, the
+   code Telegram sends, and your cloud password if you have one.
+6. Open `https://telegram.incende.fyi/spike`. It returns your 20 most recent
    chats as JSON with `total_ms`. That is the connection test.
 
 `POST /logout` (the button on the login page) calls `auth.logOut` and
@@ -79,5 +84,6 @@ latency. The development sandbox this was written in cannot reach
 ## Local development
 
 `wrangler dev` runs the Worker locally; outbound WebSockets go out from your
-machine. Put `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` and `ADMIN_TOKEN` in
-`cf-worker/.dev.vars` (gitignored) as `NAME=value` lines.
+machine. Put `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` in `cf-worker/.dev.vars`
+(gitignored) as `NAME=value` lines. Local requests have no Access JWT, so
+either run behind `cloudflared access` or temporarily stub `access::verify`.
