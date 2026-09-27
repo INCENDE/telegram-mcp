@@ -216,33 +216,58 @@ impl<'a, M: Mtp> Connection<'a, M> {
         // Telegram answers with bad_server_salt / bad_msg_notification, the
         // Mtp layer corrects itself, and we resend. Bounded so a persistent
         // rejection cannot loop forever.
-        for _ in 0..MAX_ATTEMPTS {
-            let ids = self.send(&body)?;
-            match self.wait_for(&ids).await? {
-                Outcome::Result(bytes) => return Ok(bytes),
-                Outcome::Retry => continue,
+        let mut attempts = 0;
+        let mut internal_rounds = 0;
+        while attempts < MAX_ATTEMPTS {
+            match self.send(&body)? {
+                Some(ids) => {
+                    attempts += 1;
+                    match self.wait_for(&ids).await? {
+                        Outcome::Result(bytes) => return Ok(bytes),
+                        Outcome::Retry => continue,
+                    }
+                }
+                None => {
+                    // The Mtp layer put its own traffic in the packet (a
+                    // future-salts request) and held ours back until that is
+                    // answered. Let the reply in, then push again.
+                    internal_rounds += 1;
+                    if internal_rounds > MAX_ATTEMPTS {
+                        return Err(Error::Connection(
+                            "protocol never accepted the request".into(),
+                        ));
+                    }
+                    self.wait_for(&[]).await?;
+                }
             }
         }
         Err(Error::Connection("request rejected repeatedly".into()))
     }
 
-    fn send(&mut self, body: &[u8]) -> Result<Vec<MsgId>> {
+    /// Serialize and send one packet. Returns the message ids to wait for, or
+    /// `None` when the packet carried only the protocol's internal messages
+    /// and the request itself was not included.
+    fn send(&mut self, body: &[u8]) -> Result<Option<Vec<MsgId>>> {
         // Front capacity holds the transport header (4-byte length plus the
         // 64-byte obfuscation preamble on the first packet).
         let mut buf = DequeBuffer::with_capacity(body.len() + 64, 80);
-        let msg_id = self
-            .mtp
-            .push(&mut buf, body)
-            .ok_or_else(|| Error::Connection("request too large".into()))?;
-        let mut ids = vec![msg_id];
-        if let Some(container_id) = self.mtp.finalize(&mut buf) {
-            if container_id != msg_id {
-                ids.push(container_id);
-            }
+        let msg_id = self.mtp.push(&mut buf, body);
+        let container_id = self.mtp.finalize(&mut buf);
+        if buf.is_empty() {
+            return Err(Error::Connection("request too large".into()));
         }
         self.transport.pack(&mut buf);
         self.ws.send_with_bytes(buf.as_ref())?;
-        console_log!("sent {} bytes (request {:?})", buf.len(), ids);
+        let ids = msg_id.map(|id| {
+            let mut ids = vec![id];
+            if let Some(c) = container_id {
+                if c != id {
+                    ids.push(c);
+                }
+            }
+            ids
+        });
+        console_log!("sent {} bytes ({:?})", buf.len(), ids);
         Ok(ids)
     }
 
@@ -268,7 +293,12 @@ impl<'a, M: Mtp> Connection<'a, M> {
             };
             console_log!("received {} bytes", bytes.len());
             self.read_buf.extend_from_slice(&bytes);
-            if let Some(outcome) = self.drain_read_buf(ids)? {
+            let outcome = self.drain_read_buf(ids)?;
+            if ids.is_empty() {
+                // Caller only wanted the protocol to process whatever came in.
+                return Ok(Outcome::Retry);
+            }
+            if let Some(outcome) = outcome {
                 return Ok(outcome);
             }
         }
